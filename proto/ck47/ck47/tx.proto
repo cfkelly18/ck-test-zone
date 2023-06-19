@@ -1,0 +1,7 @@
+syntax = "proto3";
+package ck47.ck47;
+
+option go_package = "ck47/x/ck47/types";
+
+// Msg defines the Msg service.
+service Msg {}

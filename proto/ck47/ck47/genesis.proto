@@ -1,0 +1,12 @@
+syntax = "proto3";
+package ck47.ck47;
+
+import "gogoproto/gogo.proto";
+import "ck47/ck47/params.proto";
+
+option go_package = "ck47/x/ck47/types";
+
+// GenesisState defines the ck47 module's genesis state.
+message GenesisState {
+  Params params = 1 [(gogoproto.nullable) = false];
+}
