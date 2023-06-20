@@ -7,6 +7,12 @@ import (
 	"os"
 	"path/filepath"
 
+	proposalhandler "github.com/skip-mev/pob/abci"
+	"github.com/skip-mev/pob/mempool"
+	"github.com/skip-mev/pob/x/builder"
+	builderkeeper "github.com/skip-mev/pob/x/builder/keeper"
+	buildertypes "github.com/skip-mev/pob/x/builder/types"
+
 	autocliv1 "cosmossdk.io/api/cosmos/autocli/v1"
 	reflectionv1 "cosmossdk.io/api/cosmos/reflection/v1"
 	dbm "github.com/cometbft/cometbft-db"
@@ -109,6 +115,7 @@ import (
 	solomachine "github.com/cosmos/ibc-go/v7/modules/light-clients/06-solomachine"
 	ibctm "github.com/cosmos/ibc-go/v7/modules/light-clients/07-tendermint"
 	"github.com/spf13/cast"
+	builderante "github.com/skip-mev/pob/x/builder/ante"
 
 	ck47module "ck47/x/ck47"
 	ck47modulekeeper "ck47/x/ck47/keeper"
@@ -173,6 +180,7 @@ var (
 		ica.AppModuleBasic{},
 		vesting.AppModuleBasic{},
 		consensus.AppModuleBasic{},
+		builder.AppModuleBasic{},
 		ck47module.AppModuleBasic{},
 		// this line is used by starport scaffolding # stargate/app/moduleBasic
 	)
@@ -187,6 +195,7 @@ var (
 		stakingtypes.NotBondedPoolName: {authtypes.Burner, authtypes.Staking},
 		govtypes.ModuleName:            {authtypes.Burner},
 		ibctransfertypes.ModuleName:    {authtypes.Minter, authtypes.Burner},
+		builder.ModuleName: nil,
 		// this line is used by starport scaffolding # stargate/app/maccPerms
 	}
 )
@@ -248,6 +257,8 @@ type App struct {
 	ScopedIBCKeeper      capabilitykeeper.ScopedKeeper
 	ScopedTransferKeeper capabilitykeeper.ScopedKeeper
 	ScopedICAHostKeeper  capabilitykeeper.ScopedKeeper
+	BuilderKeeper         builderkeeper.Keeper
+	checkTxHandler abci.CheckTx
 
 	Ck47Keeper ck47modulekeeper.Keeper
 	// this line is used by starport scaffolding # stargate/app/keeperDeclaration
@@ -277,18 +288,24 @@ func New(
 	cdc := encodingConfig.Amino
 	interfaceRegistry := encodingConfig.InterfaceRegistry
 	txConfig := encodingConfig.TxConfig
-
+	txDecode := txConfig.TxDecoder()
+	txEncode := txConfig.TxEncoder()
 	bApp := baseapp.NewBaseApp(
 		Name,
 		logger,
 		db,
-		encodingConfig.TxConfig.TxDecoder(),
+		txDecode,
 		baseAppOptions...,
 	)
 	bApp.SetCommitMultiStoreTracer(traceStore)
 	bApp.SetVersion(version.Version)
 	bApp.SetInterfaceRegistry(interfaceRegistry)
-	bApp.SetTxEncoder(txConfig.TxEncoder())
+	bApp.SetTxEncoder(txEncode)
+
+	config := mempool.NewDefaultAuctionFactory(txDecode)
+
+	mempool := mempool.NewAuctionMempool(txDecode, txEncode, maxTx, config)
+	bApp.SetMempool(mempool)
 
 	keys := sdk.NewKVStoreKeys(
 		authtypes.StoreKey, authz.ModuleName, banktypes.StoreKey, stakingtypes.StoreKey,
@@ -296,7 +313,7 @@ func New(
 		govtypes.StoreKey, paramstypes.StoreKey, ibcexported.StoreKey, upgradetypes.StoreKey,
 		feegrant.StoreKey, evidencetypes.StoreKey, ibctransfertypes.StoreKey, icahosttypes.StoreKey,
 		capabilitytypes.StoreKey, group.StoreKey, icacontrollertypes.StoreKey, consensusparamtypes.StoreKey,
-		ck47moduletypes.StoreKey,
+		ck47moduletypes.StoreKey, buildertypes.StoreKey,
 		// this line is used by starport scaffolding # stargate/app/storeKey
 	)
 	tkeys := sdk.NewTransientStoreKeys(paramstypes.TStoreKey)
@@ -518,6 +535,15 @@ func New(
 		// register the governance hooks
 		),
 	)
+	app.BuilderKeeper = builderkeeper.NewKeeper(
+		appCodec,
+		keys[buildertypes.StoreKey],
+		app.AccountKeeper,
+		app.BankKeeper,
+		app.DistrKeeper,
+		app.StakingKeeper,
+		authtypes.NewModuleAddress(govtypes.ModuleName).String(),
+	  )
 
 	app.Ck47Keeper = *ck47modulekeeper.NewKeeper(
 		appCodec,
@@ -553,6 +579,22 @@ func New(
 		),
 	)
 
+	// anteDecorators := []sdk.AnteDecorator{
+	// 	auction.NewAuctionDecorator(
+	// 	  app.BuilderKeeper,
+	// 	  txConfig.TxEncoder(),
+	// 	  mempool,
+	// 	),
+		
+	//   }
+
+	// Create the proposal handler that will be used to build and validate blocks.
+// TODO DID NOT IMPLEMENT ANTE DECORATOR
+	// anteDecorators := []sdk.AnteDecorator{
+		
+	// 	builderante.NewBuilderDecorator(app.BuilderKeeper, txEncode, mempool),
+	// }
+	  
 	/**** Module Options ****/
 
 	// NOTE: we may consider parsing `appOpts` inside module constructors. For the moment
@@ -589,6 +631,7 @@ func New(
 		transferModule,
 		icaModule,
 		ck47Module,
+		builder.NewAppModule(appCodec, app.BuilderKeeper),
 		// this line is used by starport scaffolding # stargate/app/appModule
 
 		crisis.NewAppModule(app.CrisisKeeper, skipGenesisInvariants, app.GetSubspace(crisistypes.ModuleName)), // always be last to make sure that it checks for all invariants and not only part of them
@@ -724,6 +767,7 @@ func New(
 		panic(fmt.Errorf("failed to create AnteHandler: %w", err))
 	}
 
+	
 	app.SetAnteHandler(anteHandler)
 	app.SetInitChainer(app.InitChainer)
 	app.SetBeginBlocker(app.BeginBlocker)
